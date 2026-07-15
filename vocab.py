@@ -1,46 +1,10 @@
 import streamlit as st
-import sqlite3
 from datetime import datetime
 import requests
 import random
 import re
 
-# --- DATABASE SETUP ---
-def init_db():
-    conn = sqlite3.connect("vocab_vault.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS vocabulary (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word TEXT UNIQUE NOT NULL,
-            definition TEXT NOT NULL,
-            example TEXT,
-            date_added TEXT NOT NULL,
-            correct_attempts INTEGER DEFAULT 0,
-            incorrect_attempts INTEGER DEFAULT 0,
-            mastery_level INTEGER DEFAULT 0,
-            part_of_speech TEXT DEFAULT 'Noun'
-        )
-    """)
-    
-    # Auto-migration for legacy databases
-    try:
-        cursor.execute("SELECT part_of_speech FROM vocabulary LIMIT 1")
-    except sqlite3.OperationalError:
-        cursor.execute("ALTER TABLE vocabulary ADD COLUMN part_of_speech TEXT DEFAULT 'Noun'")
-        conn.commit()
-        
-    conn.commit()
-    conn.close()
-
-init_db()
-
 # --- HELPER FUNCTIONS ---
-def get_db_connection():
-    conn = sqlite3.connect("vocab_vault.db")
-    conn.row_factory = sqlite3.Row
-    return conn
-
 def fetch_auto_definition(word):
     """Fetches definition, example, and part of speech from a free Public Dictionary API."""
     try:
@@ -72,7 +36,6 @@ def fetch_alternate_sentence(word):
                         sentences.append(d["example"])
             if sentences:
                 return random.choice(sentences)
-        # Fallback pseudo-generator if the specific API has no custom example sentence
         fallbacks = [
             f"It is important to understand how to use the word '{word}' in regular communication.",
             f"During the lecture, the professor explained the true significance of the concept of '{word}'.",
@@ -81,6 +44,35 @@ def fetch_alternate_sentence(word):
         return random.choice(fallbacks)
     except Exception:
         return f"We need to find an appropriate context for using the word '{word}'."
+
+# --- SESSION STATE INITIALIZATION ---
+# This ensures every browser tab has its OWN private dictionary list.
+if "my_vault" not in st.session_state:
+    st.session_state.my_vault = [
+        # Pre-populate with a couple of starter words so the app isn't empty at first glance
+        {
+            "id": 1,
+            "word": "Eloquent",
+            "definition": "Fluent or persuasive in speaking or writing.",
+            "example": "He made an eloquent speech about human rights.",
+            "date_added": datetime.today().strftime("%Y-%m-%d"),
+            "part_of_speech": "Adjective",
+            "correct_attempts": 0,
+            "incorrect_attempts": 0,
+            "mastery_level": 0
+        },
+        {
+            "id": 2,
+            "word": "Serendipity",
+            "definition": "The occurrence of events by chance in a happy or beneficial way.",
+            "example": "We found the charming little restaurant by pure serendipity.",
+            "date_added": datetime.today().strftime("%Y-%m-%d"),
+            "part_of_speech": "Noun",
+            "correct_attempts": 0,
+            "incorrect_attempts": 0,
+            "mastery_level": 0
+        }
+    ]
 
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="Vocab Vault", page_icon="📖", layout="wide")
@@ -123,36 +115,45 @@ if choice == "Add Vocabulary":
         if not word_input:
             st.warning("Please enter a word first!")
         else:
-            definition, example, pos = "", "", ""
-            success = True
-            
-            if generation_mode == "Auto-generate (using free online dictionary)":
-                with st.spinner("Fetching details online..."):
-                    definition, example, pos = fetch_auto_definition(word_input)
-                if not definition:
-                    st.error(f"Could not find definitions for '{word_input}' online. Please enter them manually.")
-                    success = False
+            # Prevent duplicate words in user's personal session
+            existing_words = [w["word"].lower() for w in st.session_state.my_vault]
+            if word_input.lower() in existing_words:
+                st.error("This word is already in your Vocab Vault!")
             else:
-                definition = custom_def
-                example = custom_example
-                pos = custom_pos
-                if not definition:
-                    st.warning("You must provide at least a definition to save custom entries.")
-                    success = False
+                definition, example, pos = "", "", ""
+                success = True
+                
+                if generation_mode == "Auto-generate (using free online dictionary)":
+                    with st.spinner("Fetching details online..."):
+                        definition, example, pos = fetch_auto_definition(word_input)
+                    if not definition:
+                        st.error(f"Could not find definitions for '{word_input}' online. Please enter them manually.")
+                        success = False
+                else:
+                    definition = custom_def
+                    example = custom_example
+                    pos = custom_pos
+                    if not definition:
+                        st.warning("You must provide at least a definition to save custom entries.")
+                        success = False
 
-            if success:
-                conn = get_db_connection()
-                try:
-                    conn.execute(
-                        "INSERT INTO vocabulary (word, definition, example, date_added, part_of_speech) VALUES (?, ?, ?, ?, ?)",
-                        (word_input.capitalize(), definition, example, date_input.strftime("%Y-%m-%d"), pos)
-                    )
-                    conn.commit()
-                    st.success(f"🎉 '{word_input.capitalize()}' ({pos}) added successfully!")
-                except sqlite3.IntegrityError:
-                    st.error("This word is already in your Vocab Vault!")
-                finally:
-                    conn.close()
+                if success:
+                    # Create a new unique ID for the session
+                    new_id = max([w["id"] for w in st.session_state.my_vault]) + 1 if st.session_state.my_vault else 1
+                    
+                    new_item = {
+                        "id": new_id,
+                        "word": word_input.capitalize(),
+                        "definition": definition,
+                        "example": example,
+                        "date_added": date_input.strftime("%Y-%m-%d"),
+                        "part_of_speech": pos,
+                        "correct_attempts": 0,
+                        "incorrect_attempts": 0,
+                        "mastery_level": 0
+                    }
+                    st.session_state.my_vault.append(new_item)
+                    st.success(f"🎉 '{word_input.capitalize()}' ({pos}) added to your private vault!")
 
 # ---------------------------------------------------------
 # PAGE 2: CATALOG & ARCHIVE
@@ -160,9 +161,7 @@ if choice == "Add Vocabulary":
 elif choice == "Catalog & Archive":
     st.header("🗃️ Your Personal Vocabulary Catalog")
     
-    conn = get_db_connection()
-    words_data = conn.execute("SELECT * FROM vocabulary ORDER BY date_added DESC").fetchall()
-    conn.close()
+    words_data = st.session_state.my_vault
 
     if not words_data:
         st.info("Your vault is empty! Head to 'Add Vocabulary' to add your first word.")
@@ -196,9 +195,13 @@ elif choice == "Catalog & Archive":
 
         st.write(f"Showing **{len(filtered_words)}** matching words:")
 
+        # We need to use index tracking to edit session state items directly
         for item in filtered_words:
             with st.expander(f"📌 **{item['word']}** *({item['part_of_speech']})* | Added: {item['date_added']} | Mastery Level: {item['mastery_level']}"):
                 col_left, col_right = st.columns([3, 1])
+                
+                # Find the index of this item in the master list
+                master_idx = next(i for i, w in enumerate(st.session_state.my_vault) if w["id"] == item["id"])
                 
                 with col_left:
                     new_pos = st.selectbox("Part of Speech", ["Noun", "Adjective", "Verb", "Adverb", "Pronoun", "Preposition", "Conjunction", "Interjection"], index=["Noun", "Adjective", "Verb", "Adverb", "Pronoun", "Preposition", "Conjunction", "Interjection"].index(item['part_of_speech']) if item['part_of_speech'] in ["Noun", "Adjective", "Verb", "Adverb", "Pronoun", "Preposition", "Conjunction", "Interjection"] else 0, key=f"pos_{item['id']}")
@@ -208,21 +211,14 @@ elif choice == "Catalog & Archive":
                     col_buttons = st.columns(2)
                     with col_buttons[0]:
                         if st.button("💾 Save Changes", key=f"save_{item['id']}"):
-                            conn = get_db_connection()
-                            conn.execute(
-                                "UPDATE vocabulary SET definition = ?, example = ?, part_of_speech = ? WHERE id = ?",
-                                (new_def, new_ex, new_pos, item['id'])
-                            )
-                            conn.commit()
-                            conn.close()
-                            st.success("Changes saved! Refreshing...")
+                            st.session_state.my_vault[master_idx]["part_of_speech"] = new_pos
+                            st.session_state.my_vault[master_idx]["definition"] = new_def
+                            st.session_state.my_vault[master_idx]["example"] = new_ex
+                            st.success("Changes saved!")
                             st.rerun()
                     with col_buttons[1]:
                         if st.button("🗑️ Delete Word", key=f"del_{item['id']}"):
-                            conn = get_db_connection()
-                            conn.execute("DELETE FROM vocabulary WHERE id = ?", (item['id'],))
-                            conn.commit()
-                            conn.close()
+                            st.session_state.my_vault.pop(master_idx)
                             st.warning("Word deleted.")
                             st.rerun()
                 
@@ -236,14 +232,11 @@ elif choice == "Catalog & Archive":
 elif choice == "Quiz & Mastery Center":
     st.header("🧠 Mastery Quizzes")
 
-    conn = get_db_connection()
-    all_words = conn.execute("SELECT * FROM vocabulary").fetchall()
-    conn.close()
+    all_words = st.session_state.my_vault
 
     if len(all_words) < 3:
         st.warning("Add at least 3 words to your vault to unlock quizzes.")
     else:
-        # Quiz Settings
         col_set1, col_set2 = st.columns(2)
         with col_set1:
             quiz_filter = st.selectbox(
@@ -257,13 +250,11 @@ elif choice == "Quiz & Mastery Center":
             )
         
         with col_set2:
-            # ONLY show sentence source selector if Fill-in-the-Blank is chosen
             sentence_source = "Vault"
             if quiz_type == "Fill-in-the-Blank Sentences":
                 sentence_source = st.radio(
                     "Sentence Source:",
                     ["Use Sentences Saved in Vault", "Auto-Generate Fresh Sentence (AI / Web Dictionary)"],
-                    help="Choose whether to practice with sentences you added or generate brand-new ones dynamically!"
                 )
 
         # Filter the quiz pool
@@ -277,16 +268,15 @@ elif choice == "Quiz & Mastery Center":
 
         st.write(f"Current Quiz Pool size: **{len(pool)}** words.")
 
-        # Initialize session state for quiz
+        # Initialize session state for active quiz question
         if 'quiz_word' not in st.session_state or st.button("🔄 Generate New Question"):
             st.session_state.quiz_word = random.choice(pool)
-            # Fetch distractors for matching
             distractors = [w for w in all_words if w['word'] != st.session_state.quiz_word['word']]
             st.session_state.options = random.sample(distractors, min(len(distractors), 3)) + [st.session_state.quiz_word]
             random.shuffle(st.session_state.options)
             st.session_state.answered = False
             st.session_state.feedback = ""
-            # Prepare sentence based on choice
+            
             word = st.session_state.quiz_word['word']
             if sentence_source == "Auto-Generate Fresh Sentence (AI / Web Dictionary)":
                 with st.spinner("Generating fresh contextual sentence..."):
@@ -295,6 +285,8 @@ elif choice == "Quiz & Mastery Center":
                 st.session_state.active_sentence = st.session_state.quiz_word['example']
 
         current_q = st.session_state.quiz_word
+        # Find index of this question word in the master vault list
+        master_idx = next(i for i, w in enumerate(st.session_state.my_vault) if w["id"] == current_q["id"])
 
         # --- MODE 1: FLASHCARDS ---
         if quiz_type == "Flashcards":
@@ -314,18 +306,15 @@ elif choice == "Quiz & Mastery Center":
                     col_correct, col_wrong = st.columns(2)
                     
                     if col_correct.button("👍 Got it Right!", use_container_width=True):
-                        conn = get_db_connection()
-                        conn.execute("UPDATE vocabulary SET correct_attempts = correct_attempts + 1, mastery_level = mastery_level + 1 WHERE id = ?", (current_q['id'],))
-                        conn.commit()
-                        conn.close()
+                        st.session_state.my_vault[master_idx]["correct_attempts"] += 1
+                        st.session_state.my_vault[master_idx]["mastery_level"] += 1
                         st.success("Mastery Increased!")
                         st.rerun()
                         
                     if col_wrong.button("👎 Got it Wrong", use_container_width=True):
-                        conn = get_db_connection()
-                        conn.execute("UPDATE vocabulary SET incorrect_attempts = incorrect_attempts + 1, mastery_level = CASE WHEN mastery_level > 0 THEN mastery_level - 1 ELSE 0 END WHERE id = ?", (current_q['id'],))
-                        conn.commit()
-                        conn.close()
+                        st.session_state.my_vault[master_idx]["incorrect_attempts"] += 1
+                        if st.session_state.my_vault[master_idx]["mastery_level"] > 0:
+                            st.session_state.my_vault[master_idx]["mastery_level"] -= 1
                         st.error("Mastery Decreased. Added to weak words review!")
                         st.rerun()
 
@@ -341,15 +330,15 @@ elif choice == "Quiz & Mastery Center":
                 st.session_state.answered = True
                 correct_word = options_dict[user_choice]
                 
-                conn = get_db_connection()
                 if correct_word == current_q['word']:
                     st.session_state.feedback = "✅ Correct! Well done."
-                    conn.execute("UPDATE vocabulary SET correct_attempts = correct_attempts + 1, mastery_level = mastery_level + 1 WHERE id = ?", (current_q['id'],))
+                    st.session_state.my_vault[master_idx]["correct_attempts"] += 1
+                    st.session_state.my_vault[master_idx]["mastery_level"] += 1
                 else:
                     st.session_state.feedback = f"❌ Incorrect. The correct answer was: '{current_q['word']}'."
-                    conn.execute("UPDATE vocabulary SET incorrect_attempts = incorrect_attempts + 1, mastery_level = CASE WHEN mastery_level > 0 THEN mastery_level - 1 ELSE 0 END WHERE id = ?", (current_q['id'],))
-                conn.commit()
-                conn.close()
+                    st.session_state.my_vault[master_idx]["incorrect_attempts"] += 1
+                    if st.session_state.my_vault[master_idx]["mastery_level"] > 0:
+                        st.session_state.my_vault[master_idx]["mastery_level"] -= 1
             
             if st.session_state.feedback:
                 st.write(st.session_state.feedback)
@@ -365,16 +354,12 @@ elif choice == "Quiz & Mastery Center":
                 st.warning(f"No valid sentence containing '{word}' was found in your selected source.")
                 st.info("Try switching your 'Sentence Source' toggle to 'Auto-Generate' or generate a new question.")
             else:
-                # Blank out the word (case-insensitive)
                 blanked_sentence = re.sub(re.escape(word), "_______", sentence, flags=re.IGNORECASE)
                 
                 difficulty = "Medium" if len(word) > 7 else "Easy"
                 st.caption(f"Difficulty Level: {difficulty} | Clue: {current_q['part_of_speech']}")
-                
-                # Render the blanked sentence
                 st.markdown(f"### *\"{blanked_sentence}\"*")
                 
-                # --- HINT OPTION ---
                 with st.expander("💡 Need a Hint?"):
                     st.write(f"**Definition:** {current_q['definition']}")
                 
@@ -382,15 +367,15 @@ elif choice == "Quiz & Mastery Center":
 
                 if st.button("Submit Guess") and not st.session_state.answered:
                     st.session_state.answered = True
-                    conn = get_db_connection()
                     if user_guess == word.lower():
                         st.session_state.feedback = "🎉 Spot on! Correct."
-                        conn.execute("UPDATE vocabulary SET correct_attempts = correct_attempts + 1, mastery_level = mastery_level + 1 WHERE id = ?", (current_q['id'],))
+                        st.session_state.my_vault[master_idx]["correct_attempts"] += 1
+                        st.session_state.my_vault[master_idx]["mastery_level"] += 1
                     else:
                         st.session_state.feedback = f"❌ Incorrect. The correct word was '{word}'."
-                        conn.execute("UPDATE vocabulary SET incorrect_attempts = incorrect_attempts + 1, mastery_level = CASE WHEN mastery_level > 0 THEN mastery_level - 1 ELSE 0 END WHERE id = ?", (current_q['id'],))
-                    conn.commit()
-                    conn.close()
+                        st.session_state.my_vault[master_idx]["incorrect_attempts"] += 1
+                        if st.session_state.my_vault[master_idx]["mastery_level"] > 0:
+                            st.session_state.my_vault[master_idx]["mastery_level"] -= 1
 
                 if st.session_state.feedback:
                     st.write(st.session_state.feedback)
